@@ -15,6 +15,7 @@ import {
   deleteProject,
   deleteTimeEntry,
   loadAppData,
+  migrateLocalDataToSupabase,
   updateAiUsage,
   updateExpense,
   updateHomeAccount,
@@ -156,6 +157,15 @@ export function useAppData() {
     updateHomeAccountOccurrenceStatus: async (id: string, status: HomePaymentStatus) => {
       await updateHomeAccountOccurrenceStatus(id, status);
       await refresh();
+    },
+    migrateLocalDataToSupabase: async () => {
+      const result = await migrateLocalDataToSupabase();
+
+      if (result.success) {
+        await refresh();
+      }
+
+      return result;
     }
   };
 }

@@ -1,11 +1,14 @@
 "use client";
 
+import { useState } from "react";
 import { SourceIndicator } from "@/components/shared/source-indicator";
 import { useAppData } from "@/hooks/use-app-data";
 import { formatCurrency, formatHours } from "@/lib/format";
 
 export function DashboardPage() {
-  const { metrics, loading, error } = useAppData();
+  const { metrics, loading, error, migrateLocalDataToSupabase } = useAppData();
+  const [migrationMessage, setMigrationMessage] = useState<string | null>(null);
+  const [migrationLoading, setMigrationLoading] = useState(false);
 
   const cards = [
     {
@@ -68,6 +71,24 @@ export function DashboardPage() {
     return "bg-slate-500/70";
   }
 
+  async function handleMigration() {
+    setMigrationLoading(true);
+    setMigrationMessage(null);
+
+    try {
+      const result = await migrateLocalDataToSupabase();
+      setMigrationMessage(result.message);
+    } catch (migrationError) {
+      setMigrationMessage(
+        migrationError instanceof Error
+          ? migrationError.message
+          : "Nao foi possivel migrar os dados locais."
+      );
+    } finally {
+      setMigrationLoading(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <section className="rounded-[32px] border border-slate-800 bg-[linear-gradient(135deg,rgba(30,41,59,0.9),rgba(15,23,42,0.96))] p-6 shadow-[0_10px_26px_rgba(2,6,23,0.22)]">
@@ -85,6 +106,29 @@ export function DashboardPage() {
           </div>
           <div className="shrink-0">
             <SourceIndicator />
+          </div>
+        </div>
+        <div className="mt-5 flex flex-col gap-3 border-t border-slate-800/80 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
+              Migracao
+            </p>
+            <p className="mt-1 text-sm text-slate-400">
+              Envia os dados atuais do localStorage para a nuvem sem apagar o backup local.
+            </p>
+          </div>
+          <div className="flex flex-col items-start gap-2 sm:items-end">
+            <button
+              type="button"
+              onClick={() => void handleMigration()}
+              disabled={migrationLoading}
+              className="inline-flex items-center rounded-full border border-blue-500/30 bg-blue-500/10 px-4 py-2 text-sm font-medium text-blue-200 transition hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {migrationLoading ? "Migrando..." : "Migrar dados locais para nuvem"}
+            </button>
+            {migrationMessage ? (
+              <p className="text-xs text-slate-400">{migrationMessage}</p>
+            ) : null}
           </div>
         </div>
       </section>

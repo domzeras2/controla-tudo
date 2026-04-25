@@ -233,23 +233,6 @@ function mergeWithSeed(data?: Partial<AppData> | null): AppData {
   });
 }
 
-function getLatestTimestamp(data: AppData) {
-  const timestamps = [
-    ...data.expenses.flatMap((item) => [item.updated_at, item.created_at]),
-    ...data.timeEntries.flatMap((item) => [item.updated_at, item.created_at]),
-    ...data.projects.flatMap((item) => [item.updated_at, item.created_at]),
-    ...data.aiUsages.flatMap((item) => [item.updated_at, item.created_at]),
-    ...data.homeRevenues.flatMap((item) => [item.updated_at, item.created_at]),
-    ...data.homeAccounts.flatMap((item) => [item.updated_at, item.created_at]),
-    ...data.homeInstallments.flatMap((item) => [item.updated_at, item.created_at]),
-    ...data.homeAccountOccurrences.flatMap((item) => [item.updated_at, item.created_at])
-  ]
-    .filter(Boolean)
-    .map((value) => +new Date(value as string));
-
-  return timestamps.length ? Math.max(...timestamps) : 0;
-}
-
 function readLocalData(): AppData {
   if (typeof window === "undefined") {
     return mergeWithSeed();
@@ -276,14 +259,29 @@ function readLocalData(): AppData {
   }
 }
 
-function hasStoredLocalData() {
-  if (typeof window === "undefined") return false;
-  return Boolean(window.localStorage.getItem(STORAGE_KEY));
-}
-
 function writeLocalData(data: AppData) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizeData(data)));
+}
+
+function readStoredLocalData() {
+  if (typeof window === "undefined") return null;
+
+  const stored = window.localStorage.getItem(STORAGE_KEY);
+
+  if (!stored) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(stored) as Partial<AppData>;
+    const normalized = mergeWithSeed(parsed);
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+    return normalized;
+  } catch (error) {
+    console.error("Erro ao ler localStorage armazenado:", error);
+    return null;
+  }
 }
 
 async function loadSupabaseData() {
@@ -358,36 +356,65 @@ async function persistData(data: AppData) {
   return normalized;
 }
 
-export async function loadAppData() {
-  const hadStoredLocalData = hasStoredLocalData();
-  const localData = readLocalData();
+export async function migrateLocalDataToSupabase() {
+  const localData = readStoredLocalData();
+
+  if (!localData) {
+    return {
+      success: false,
+      message: "Nenhum dado local encontrado para migrar."
+    };
+  }
 
   if (!isSupabaseConfigured()) {
-    return localData;
+    return {
+      success: false,
+      message: "Supabase nao configurado."
+    };
+  }
+
+  const saved = await saveSupabaseData(localData);
+
+  if (!saved) {
+    return {
+      success: false,
+      message: "Nao foi possivel migrar os dados para o Supabase."
+    };
+  }
+
+  console.log("Dados migrados do localStorage para Supabase");
+
+  return {
+    success: true,
+    message: "Dados locais migrados para a nuvem com sucesso."
+  };
+}
+
+export async function loadAppData() {
+  const storedLocalData = readStoredLocalData();
+
+  if (!isSupabaseConfigured()) {
+    return storedLocalData ?? readLocalData();
   }
 
   const remoteData = await loadSupabaseData();
 
-  if (!remoteData) {
-    return localData;
-  }
-
-  if (!hadStoredLocalData) {
+  if (remoteData) {
     writeLocalData(remoteData);
     return remoteData;
   }
 
-  const localVersion = getLatestTimestamp(localData);
-  const remoteVersion = getLatestTimestamp(remoteData);
-  const chosen = localVersion > remoteVersion ? localData : remoteData;
+  if (storedLocalData) {
+    const saved = await saveSupabaseData(storedLocalData);
 
-  writeLocalData(chosen);
+    if (saved) {
+      console.log("Dados migrados do localStorage para Supabase");
+    }
 
-  if (chosen === localData && localVersion > remoteVersion) {
-    await saveSupabaseData(chosen);
+    return storedLocalData;
   }
 
-  return chosen;
+  return readLocalData();
 }
 
 export async function createExpense(input: ExpenseInput) {
