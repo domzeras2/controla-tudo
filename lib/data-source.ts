@@ -20,6 +20,12 @@ import {
 } from "@/lib/types";
 
 const STORAGE_KEY = "painel-controle-ia-data";
+const APP_DATA_ROW_ID = "user-1";
+
+type AppDataRow = {
+  id: string;
+  data: Partial<AppData> | null;
+};
 
 function cloneSeed() {
   return JSON.parse(JSON.stringify(mockData)) as AppData;
@@ -201,39 +207,78 @@ function normalizeData(data: AppData): AppData {
 
   return {
     ...data,
+    expenses: sortByDateDesc(data.expenses),
+    timeEntries: sortByDateDesc(data.timeEntries),
+    projects: sortByDateDesc(data.projects),
+    aiUsages: sortByDateDesc(data.aiUsages),
+    homeRevenues: sortByDateDesc(data.homeRevenues),
+    homeAccounts: sortByDateDesc(data.homeAccounts),
     homeInstallments: sortByDateDesc(normalizedInstallments),
     homeAccountOccurrences: normalizedOccurrences
   };
 }
 
+function mergeWithSeed(data?: Partial<AppData> | null): AppData {
+  const seed = cloneSeed();
+
+  return normalizeData({
+    expenses: data?.expenses ?? seed.expenses,
+    timeEntries: data?.timeEntries ?? seed.timeEntries,
+    projects: data?.projects ?? seed.projects,
+    aiUsages: data?.aiUsages ?? seed.aiUsages,
+    homeRevenues: data?.homeRevenues ?? seed.homeRevenues,
+    homeAccounts: data?.homeAccounts ?? seed.homeAccounts,
+    homeInstallments: data?.homeInstallments ?? seed.homeInstallments,
+    homeAccountOccurrences: data?.homeAccountOccurrences ?? seed.homeAccountOccurrences
+  });
+}
+
+function getLatestTimestamp(data: AppData) {
+  const timestamps = [
+    ...data.expenses.flatMap((item) => [item.updated_at, item.created_at]),
+    ...data.timeEntries.flatMap((item) => [item.updated_at, item.created_at]),
+    ...data.projects.flatMap((item) => [item.updated_at, item.created_at]),
+    ...data.aiUsages.flatMap((item) => [item.updated_at, item.created_at]),
+    ...data.homeRevenues.flatMap((item) => [item.updated_at, item.created_at]),
+    ...data.homeAccounts.flatMap((item) => [item.updated_at, item.created_at]),
+    ...data.homeInstallments.flatMap((item) => [item.updated_at, item.created_at]),
+    ...data.homeAccountOccurrences.flatMap((item) => [item.updated_at, item.created_at])
+  ]
+    .filter(Boolean)
+    .map((value) => +new Date(value as string));
+
+  return timestamps.length ? Math.max(...timestamps) : 0;
+}
+
 function readLocalData(): AppData {
   if (typeof window === "undefined") {
-    return normalizeData(cloneSeed());
+    return mergeWithSeed();
   }
 
   const stored = window.localStorage.getItem(STORAGE_KEY);
 
   if (!stored) {
-    const seed = normalizeData(cloneSeed());
+    const seed = mergeWithSeed();
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(seed));
     return seed;
   }
 
-  const parsed = JSON.parse(stored) as Partial<AppData>;
-  const seed = cloneSeed();
-  const normalized = normalizeData({
-    expenses: parsed.expenses ?? seed.expenses,
-    timeEntries: parsed.timeEntries ?? seed.timeEntries,
-    projects: parsed.projects ?? seed.projects,
-    aiUsages: parsed.aiUsages ?? seed.aiUsages,
-    homeRevenues: parsed.homeRevenues ?? seed.homeRevenues,
-    homeAccounts: parsed.homeAccounts ?? seed.homeAccounts,
-    homeInstallments: parsed.homeInstallments ?? seed.homeInstallments,
-    homeAccountOccurrences: parsed.homeAccountOccurrences ?? seed.homeAccountOccurrences
-  });
+  try {
+    const parsed = JSON.parse(stored) as Partial<AppData>;
+    const normalized = mergeWithSeed(parsed);
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+    return normalized;
+  } catch (error) {
+    console.error("Erro ao ler localStorage, usando dados iniciais:", error);
+    const seed = mergeWithSeed();
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(seed));
+    return seed;
+  }
+}
 
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
-  return normalized;
+function hasStoredLocalData() {
+  if (typeof window === "undefined") return false;
+  return Boolean(window.localStorage.getItem(STORAGE_KEY));
 }
 
 function writeLocalData(data: AppData) {
@@ -241,90 +286,123 @@ function writeLocalData(data: AppData) {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizeData(data)));
 }
 
-async function getSupabaseData(): Promise<AppData> {
+async function loadSupabaseData() {
   const client = getSupabaseBrowserClient();
 
-  if (!client) {
-    return readLocalData();
+  if (!client) return null;
+
+  console.log("Carregando dados do Supabase");
+
+  try {
+    const response = await client
+      .from("app_data")
+      .select("id, data")
+      .eq("id", APP_DATA_ROW_ID)
+      .maybeSingle<AppDataRow>();
+
+    if (response.error) {
+      console.error("Erro ao carregar dados do Supabase:", response.error);
+      return null;
+    }
+
+    if (!response.data?.data) {
+      return null;
+    }
+
+    return mergeWithSeed(response.data.data);
+  } catch (error) {
+    console.error("Erro detalhado ao carregar dados do Supabase:", error);
+    return null;
+  }
+}
+
+async function saveSupabaseData(data: AppData) {
+  const client = getSupabaseBrowserClient();
+
+  if (!client) return false;
+
+  try {
+    const response = await client
+      .from("app_data")
+      .upsert(
+        {
+          id: APP_DATA_ROW_ID,
+          data: normalizeData(data)
+        },
+        {
+          onConflict: "id"
+        }
+      );
+
+    if (response.error) {
+      console.error("Erro ao salvar dados no Supabase:", response.error);
+      return false;
+    }
+
+    console.log("Dados salvos no Supabase");
+    return true;
+  } catch (error) {
+    console.error("Erro detalhado ao salvar dados no Supabase:", error);
+    return false;
+  }
+}
+
+async function persistData(data: AppData) {
+  const normalized = normalizeData(data);
+  writeLocalData(normalized);
+
+  if (isSupabaseConfigured()) {
+    await saveSupabaseData(normalized);
   }
 
-  const [expenses, timeEntries, projects, aiUsages] = await Promise.all([
-    client.from("expenses").select("*").order("date", { ascending: false }),
-    client.from("time_entries").select("*").order("date", { ascending: false }),
-    client.from("projects").select("*").order("updated_at", { ascending: false }),
-    client.from("ai_usage_entries").select("*").order("date", { ascending: false })
-  ]);
-
-  if (expenses.error) throw expenses.error;
-  if (timeEntries.error) throw timeEntries.error;
-  if (projects.error) throw projects.error;
-  if (aiUsages.error) throw aiUsages.error;
-
-  const localData = readLocalData();
-
-  return {
-    expenses: expenses.data as Expense[],
-    timeEntries: timeEntries.data as TimeEntry[],
-    projects: projects.data as Project[],
-    aiUsages: aiUsages.data as AiUsageEntry[],
-    homeRevenues: sortByDateDesc(localData.homeRevenues),
-    homeAccounts: sortByDateDesc(localData.homeAccounts),
-    homeInstallments: sortByDateDesc(localData.homeInstallments),
-    homeAccountOccurrences: sortByDateDesc(localData.homeAccountOccurrences)
-  };
+  return normalized;
 }
 
 export async function loadAppData() {
-  if (isSupabaseConfigured()) {
-    return getSupabaseData();
+  const hadStoredLocalData = hasStoredLocalData();
+  const localData = readLocalData();
+
+  if (!isSupabaseConfigured()) {
+    return localData;
   }
 
-  const data = readLocalData();
+  const remoteData = await loadSupabaseData();
 
-  return {
-    expenses: sortByDateDesc(data.expenses),
-    timeEntries: sortByDateDesc(data.timeEntries),
-    projects: sortByDateDesc(data.projects),
-    aiUsages: sortByDateDesc(data.aiUsages),
-    homeRevenues: sortByDateDesc(data.homeRevenues),
-    homeAccounts: sortByDateDesc(data.homeAccounts),
-    homeInstallments: sortByDateDesc(data.homeInstallments),
-    homeAccountOccurrences: sortByDateDesc(data.homeAccountOccurrences)
-  };
+  if (!remoteData) {
+    return localData;
+  }
+
+  if (!hadStoredLocalData) {
+    writeLocalData(remoteData);
+    return remoteData;
+  }
+
+  const localVersion = getLatestTimestamp(localData);
+  const remoteVersion = getLatestTimestamp(remoteData);
+  const chosen = localVersion > remoteVersion ? localData : remoteData;
+
+  writeLocalData(chosen);
+
+  if (chosen === localData && localVersion > remoteVersion) {
+    await saveSupabaseData(chosen);
+  }
+
+  return chosen;
 }
 
 export async function createExpense(input: ExpenseInput) {
-  if (isSupabaseConfigured()) {
-    const client = getSupabaseBrowserClient();
-    const response = await client!.from("expenses").insert(input).select("*").single();
-    if (response.error) throw response.error;
-    return response.data as Expense;
-  }
-
   const data = readLocalData();
   const created = stamp({
     id: createId("exp"),
     ...input
   });
 
-  data.expenses = sortByDateDesc([created, ...data.expenses]);
-  writeLocalData(data);
+  data.expenses = [created as Expense, ...data.expenses];
+  await persistData(data);
   return created as Expense;
 }
 
 export async function updateExpense(id: string, input: ExpenseInput) {
-  if (isSupabaseConfigured()) {
-    const client = getSupabaseBrowserClient();
-    const response = await client!
-      .from("expenses")
-      .update(input)
-      .eq("id", id)
-      .select("*")
-      .single();
-    if (response.error) throw response.error;
-    return response.data as Expense;
-  }
-
   const data = readLocalData();
   const previous = data.expenses.find((item) => item.id === id);
   if (!previous) throw new Error("Gasto não encontrado.");
@@ -334,56 +412,30 @@ export async function updateExpense(id: string, input: ExpenseInput) {
     ...input
   });
 
-  data.expenses = sortByDateDesc(data.expenses.map((item) => (item.id === id ? updated : item)));
-  writeLocalData(data);
+  data.expenses = data.expenses.map((item) => (item.id === id ? updated : item));
+  await persistData(data);
   return updated;
 }
 
 export async function deleteExpense(id: string) {
-  if (isSupabaseConfigured()) {
-    const client = getSupabaseBrowserClient();
-    const response = await client!.from("expenses").delete().eq("id", id);
-    if (response.error) throw response.error;
-    return;
-  }
-
   const data = readLocalData();
   data.expenses = data.expenses.filter((item) => item.id !== id);
-  writeLocalData(data);
+  await persistData(data);
 }
 
 export async function createTimeEntry(input: TimeEntryInput) {
-  if (isSupabaseConfigured()) {
-    const client = getSupabaseBrowserClient();
-    const response = await client!.from("time_entries").insert(input).select("*").single();
-    if (response.error) throw response.error;
-    return response.data as TimeEntry;
-  }
-
   const data = readLocalData();
   const created = stamp({
     id: createId("time"),
     ...input
   });
 
-  data.timeEntries = sortByDateDesc([created, ...data.timeEntries]);
-  writeLocalData(data);
+  data.timeEntries = [created as TimeEntry, ...data.timeEntries];
+  await persistData(data);
   return created as TimeEntry;
 }
 
 export async function updateTimeEntry(id: string, input: TimeEntryInput) {
-  if (isSupabaseConfigured()) {
-    const client = getSupabaseBrowserClient();
-    const response = await client!
-      .from("time_entries")
-      .update(input)
-      .eq("id", id)
-      .select("*")
-      .single();
-    if (response.error) throw response.error;
-    return response.data as TimeEntry;
-  }
-
   const data = readLocalData();
   const previous = data.timeEntries.find((item) => item.id === id);
   if (!previous) throw new Error("Registro de tempo não encontrado.");
@@ -393,53 +445,30 @@ export async function updateTimeEntry(id: string, input: TimeEntryInput) {
     ...input
   });
 
-  data.timeEntries = sortByDateDesc(
-    data.timeEntries.map((item) => (item.id === id ? updated : item))
-  );
-  writeLocalData(data);
+  data.timeEntries = data.timeEntries.map((item) => (item.id === id ? updated : item));
+  await persistData(data);
   return updated;
 }
 
 export async function deleteTimeEntry(id: string) {
-  if (isSupabaseConfigured()) {
-    const client = getSupabaseBrowserClient();
-    const response = await client!.from("time_entries").delete().eq("id", id);
-    if (response.error) throw response.error;
-    return;
-  }
-
   const data = readLocalData();
   data.timeEntries = data.timeEntries.filter((item) => item.id !== id);
-  writeLocalData(data);
+  await persistData(data);
 }
 
 export async function createProject(input: ProjectInput) {
-  if (isSupabaseConfigured()) {
-    const client = getSupabaseBrowserClient();
-    const response = await client!.from("projects").insert(input).select("*").single();
-    if (response.error) throw response.error;
-    return response.data as Project;
-  }
-
   const data = readLocalData();
   const created = stamp({
     id: createId("proj"),
     ...input
   });
 
-  data.projects = sortByDateDesc([created, ...data.projects]);
-  writeLocalData(data);
+  data.projects = [created as Project, ...data.projects];
+  await persistData(data);
   return created as Project;
 }
 
 export async function updateProject(id: string, input: ProjectInput) {
-  if (isSupabaseConfigured()) {
-    const client = getSupabaseBrowserClient();
-    const response = await client!.from("projects").update(input).eq("id", id).select("*").single();
-    if (response.error) throw response.error;
-    return response.data as Project;
-  }
-
   const data = readLocalData();
   const previous = data.projects.find((item) => item.id === id);
   if (!previous) throw new Error("Projeto não encontrado.");
@@ -449,56 +478,30 @@ export async function updateProject(id: string, input: ProjectInput) {
     ...input
   });
 
-  data.projects = sortByDateDesc(data.projects.map((item) => (item.id === id ? updated : item)));
-  writeLocalData(data);
+  data.projects = data.projects.map((item) => (item.id === id ? updated : item));
+  await persistData(data);
   return updated;
 }
 
 export async function deleteProject(id: string) {
-  if (isSupabaseConfigured()) {
-    const client = getSupabaseBrowserClient();
-    const response = await client!.from("projects").delete().eq("id", id);
-    if (response.error) throw response.error;
-    return;
-  }
-
   const data = readLocalData();
   data.projects = data.projects.filter((item) => item.id !== id);
-  writeLocalData(data);
+  await persistData(data);
 }
 
 export async function createAiUsage(input: AiUsageInput) {
-  if (isSupabaseConfigured()) {
-    const client = getSupabaseBrowserClient();
-    const response = await client!.from("ai_usage_entries").insert(input).select("*").single();
-    if (response.error) throw response.error;
-    return response.data as AiUsageEntry;
-  }
-
   const data = readLocalData();
   const created = stamp({
     id: createId("ai"),
     ...input
   });
 
-  data.aiUsages = sortByDateDesc([created, ...data.aiUsages]);
-  writeLocalData(data);
+  data.aiUsages = [created as AiUsageEntry, ...data.aiUsages];
+  await persistData(data);
   return created as AiUsageEntry;
 }
 
 export async function updateAiUsage(id: string, input: AiUsageInput) {
-  if (isSupabaseConfigured()) {
-    const client = getSupabaseBrowserClient();
-    const response = await client!
-      .from("ai_usage_entries")
-      .update(input)
-      .eq("id", id)
-      .select("*")
-      .single();
-    if (response.error) throw response.error;
-    return response.data as AiUsageEntry;
-  }
-
   const data = readLocalData();
   const previous = data.aiUsages.find((item) => item.id === id);
   if (!previous) throw new Error("Registro de uso de IA não encontrado.");
@@ -508,22 +511,15 @@ export async function updateAiUsage(id: string, input: AiUsageInput) {
     ...input
   });
 
-  data.aiUsages = sortByDateDesc(data.aiUsages.map((item) => (item.id === id ? updated : item)));
-  writeLocalData(data);
+  data.aiUsages = data.aiUsages.map((item) => (item.id === id ? updated : item));
+  await persistData(data);
   return updated;
 }
 
 export async function deleteAiUsage(id: string) {
-  if (isSupabaseConfigured()) {
-    const client = getSupabaseBrowserClient();
-    const response = await client!.from("ai_usage_entries").delete().eq("id", id);
-    if (response.error) throw response.error;
-    return;
-  }
-
   const data = readLocalData();
   data.aiUsages = data.aiUsages.filter((item) => item.id !== id);
-  writeLocalData(data);
+  await persistData(data);
 }
 
 export async function createHomeRevenue(input: HomeRevenueInput) {
@@ -533,8 +529,8 @@ export async function createHomeRevenue(input: HomeRevenueInput) {
     ...input
   });
 
-  data.homeRevenues = sortByDateDesc([created, ...data.homeRevenues]);
-  writeLocalData(data);
+  data.homeRevenues = [created as HomeRevenue, ...data.homeRevenues];
+  await persistData(data);
   return created as HomeRevenue;
 }
 
@@ -548,17 +544,15 @@ export async function updateHomeRevenue(id: string, input: HomeRevenueInput) {
     ...input
   });
 
-  data.homeRevenues = sortByDateDesc(
-    data.homeRevenues.map((item) => (item.id === id ? updated : item))
-  );
-  writeLocalData(data);
+  data.homeRevenues = data.homeRevenues.map((item) => (item.id === id ? updated : item));
+  await persistData(data);
   return updated;
 }
 
 export async function deleteHomeRevenue(id: string) {
   const data = readLocalData();
   data.homeRevenues = data.homeRevenues.filter((item) => item.id !== id);
-  writeLocalData(data);
+  await persistData(data);
 }
 
 export async function createHomeAccount(input: HomeAccountInput) {
@@ -567,11 +561,11 @@ export async function createHomeAccount(input: HomeAccountInput) {
     id: createId("acc"),
     ...input
   });
-  const installments = buildInstallments(created);
+  const installments = buildInstallments(created as HomeAccount);
 
-  data.homeAccounts = sortByDateDesc([created, ...data.homeAccounts]);
-  data.homeInstallments = sortByDateDesc([...installments, ...data.homeInstallments]);
-  writeLocalData(data);
+  data.homeAccounts = [created as HomeAccount, ...data.homeAccounts];
+  data.homeInstallments = [...installments, ...data.homeInstallments];
+  await persistData(data);
   return created as HomeAccount;
 }
 
@@ -585,18 +579,16 @@ export async function updateHomeAccount(id: string, input: HomeAccountInput) {
     ...input
   });
   const installments = buildInstallments(
-    updated,
+    updated as HomeAccount,
     data.homeInstallments.filter((item) => item.account_id === id)
   );
 
-  data.homeAccounts = sortByDateDesc(
-    data.homeAccounts.map((item) => (item.id === id ? updated : item))
-  );
-  data.homeInstallments = sortByDateDesc([
+  data.homeAccounts = data.homeAccounts.map((item) => (item.id === id ? updated : item));
+  data.homeInstallments = [
     ...data.homeInstallments.filter((item) => item.account_id !== id),
     ...installments
-  ]);
-  writeLocalData(data);
+  ];
+  await persistData(data);
   return updated;
 }
 
@@ -605,7 +597,7 @@ export async function deleteHomeAccount(id: string) {
   data.homeAccounts = data.homeAccounts.filter((item) => item.id !== id);
   data.homeInstallments = data.homeInstallments.filter((item) => item.account_id !== id);
   data.homeAccountOccurrences = data.homeAccountOccurrences.filter((item) => item.account_id !== id);
-  writeLocalData(data);
+  await persistData(data);
 }
 
 export async function updateHomeInstallmentStatus(id: string, status: HomePaymentStatus) {
@@ -613,7 +605,7 @@ export async function updateHomeInstallmentStatus(id: string, status: HomePaymen
   data.homeInstallments = data.homeInstallments.map((item) =>
     item.id === id ? touch({ ...item, status }) : item
   );
-  writeLocalData(data);
+  await persistData(data);
 }
 
 export async function updateHomeAccountOccurrenceStatus(id: string, status: HomePaymentStatus) {
@@ -621,5 +613,5 @@ export async function updateHomeAccountOccurrenceStatus(id: string, status: Home
   data.homeAccountOccurrences = data.homeAccountOccurrences.map((item) =>
     item.id === id ? touch({ ...item, status }) : item
   );
-  writeLocalData(data);
+  await persistData(data);
 }
